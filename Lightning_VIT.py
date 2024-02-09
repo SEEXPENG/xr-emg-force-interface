@@ -35,32 +35,32 @@ class EMGLightningNet(L.LightningModule):
         
         # transformer conv
         self.hidden_channel = 128
-        self.patch_size = (4,4)
+        self.patch_size = (2,2)
         #### convolution layer to segment image into patches
         self.patch_conv = nn.Conv2d(self.encoder_channel, self.hidden_channel, self.patch_size, stride=self.patch_size)
-        # (batch, 128, 8,8)
+        # (batch, 128, 16,16)
         
         # vision transformer
         #### positional embedding
-        self.positional_embeds = nn.Embedding(65, self.hidden_channel)
+        self.positional_embeds = nn.Embedding(257, self.hidden_channel)
         #### positional embedding's id from 0 to a big number
-        self.register_buffer("positional_ids", torch.arange(65).unsqueeze(0))
+        self.register_buffer("positional_ids", torch.arange(257).unsqueeze(0))
         #### number of transformer encoder layers
-        self.num_layers = 6
+        self.num_layers = 10
         
-        # (batch, 128, 64)
+        # (batch, 128, 256)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 self.hidden_channel, # number of channels
                 2, # number of heads in attention mechanism
                 self.hidden_channel * 8 // 3, # the width of feedforward network
-                activation=F.silu,
+                activation=F.gelu,
                 batch_first=True,
                 norm_first=True,
             ),
             self.num_layers,
         )
-        # (batch, 128, 64)
+        # (batch, 128, 256)
         
         #### deconv back
         self.patch_deconv = nn.ConvTranspose2d(self.hidden_channel, self.hidden_channel//2, self.patch_size, stride=self.patch_size)

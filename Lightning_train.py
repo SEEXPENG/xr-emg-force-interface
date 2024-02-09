@@ -143,17 +143,19 @@ def evaluate(model, args):
 
 def train_lightning(args):
     dataset = EMGDataset(os.path.join(os.getcwd(), 'Dataset'))
-    trainloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=8, persistent_workers=True, shuffle=True, pin_memory=True)
-    model = Lightning_VIT.EMGLightningNet(args)
+    trainloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=10, persistent_workers=True, shuffle=True, pin_memory=True)
+    model = Lightning_VIT.EMGLightningMLP(args)
     trainer = L.Trainer(max_epochs=args.num_epochs,
                     callbacks=[], precision="16-mixed", profiler="simple")
 
-    trainer.fit(model, train_dataloaders=trainloader, val_dataloaders=trainloader)
+    trainer.fit(model, train_dataloaders=trainloader,
+                    # ckpt_path=os.path.join(os.getcwd(), 'lightning_logs', 'version_12', 'checkpoints', 'epoch=11-step=17052.ckpt')
+                    )
 
 def test_lightning(args):
     args.cuda = torch.cuda.is_available()
     args.data_path = os.path.join(os.getcwd(), 'Data')
-    model = Lightning_VIT.EMGLightningNet(args)
+    model = Lightning_VIT.EMGLightningMLP(args)
     ckpt = torch.load(os.path.join(os.getcwd(), 'lightning_logs', 'version_1', 'checkpoints', 'epoch=29-step=42630.ckpt'))
     # ckpt = torch.load("C:\\Users\\11037\\Desktop\\xr-emg-force-interface\\lightning_logs\\version_24\\checkpoints\\epoch=59-step=85260.ckpt")
     model.load_state_dict(ckpt['state_dict'], strict=True)
@@ -170,8 +172,8 @@ def test_lightning(args):
 def main(args):
     torch.cuda.manual_seed(args.seed)
     torch.manual_seed(args.seed)
-    train_lightning(args)
-    # test_lightning(args)
+    # train_lightning(args)
+    test_lightning(args)
 
 if __name__ == '__main__':
     main(FLAGS)
