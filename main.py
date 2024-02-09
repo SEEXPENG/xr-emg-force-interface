@@ -12,6 +12,7 @@ import argparse
 import random
 import torch
 import os
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description='Force-Aware Interface via Electromyography for Natural VR/AR Interaction')
 parser.add_argument('--seed', type=int, default=123, help='Random seed')
@@ -42,7 +43,9 @@ def train(model, dataloader, optimizer, args):
     all = 0
     losses_classification = []
     losses_regression = []
-    for emg, force, force_class in dataloader:
+    loop = tqdm(dataloader, leave=True)
+    
+    for emg, force, force_class in loop:
         if args.cuda:
             emg, force, force_class = emg.cuda(), force.cuda(), force_class.cuda()
         logits = model(emg)
