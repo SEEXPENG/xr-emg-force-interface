@@ -13,6 +13,7 @@ import os
 from tqdm import tqdm
 import lightning as L
 import pickle
+from tqdm import tqdm
 
 from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -59,10 +60,10 @@ def evaluate(model, args):
     force_pred_session_all = []
     force_gt_session_all = []
     with torch.no_grad():
-        for i, sid in enumerate(session_ids):
+        for i, sid in tqdm(enumerate(session_ids), total=len(session_ids)):
             force_pred_session = []
             force_gt_session = []
-            for j, fid in enumerate(file_ids):
+            for j, fid in tqdm(enumerate(file_ids), total=len(file_ids)):
                 emg = torch.from_numpy(np.load(os.path.join(args.data_path, "Session{:d}".format(sid), "emg_test_{:d}.npy".format(fid))))
                 force = torch.from_numpy(np.load(os.path.join(args.data_path, "Session{:d}".format(sid), "force_test_{:d}.npy".format(fid))))
                 force_class = torch.from_numpy(np.load(os.path.join(args.data_path, "Session{:d}".format(sid), "force_class_test_{:d}.npy".format(fid))))
@@ -128,7 +129,7 @@ def train_lightning(args):
         save_top_k=3,
         monitor="train_loss",
         mode="min",
-        dirpath="./withsoftmax5layer/",
+        dirpath="./10layer_transformer/",
         filename="sample-{epoch:02d}-{train_loss:.2f}",
     )
     trainer = L.Trainer(max_epochs=args.num_epochs,
@@ -136,16 +137,14 @@ def train_lightning(args):
 
     
     trainer.fit(model, train_dataloaders=trainloader,
-                    # ckpt_path=os.path.join(os.getcwd(), '10layertransformer', 'sample-epoch=99-train_loss=0.09.ckpt')
-                    # ckpt_path=os.path.join(os.getcwd(), 'withsoftmax5layer', 'sample-epoch=99-train_loss=0.36.ckpt')
+                    # ckpt_path=os.path.join(os.getcwd(), 'ckpts_good', '10layer-epoch=99-train_loss=0.09.ckpt')
                     )
 
 def test_lightning(args):
     args.cuda = torch.cuda.is_available()
     args.data_path = os.path.join(os.getcwd(), 'Data')
     model = Lightning_VIT.EMGLightningNet(args)
-    ckpt = torch.load(os.path.join(os.getcwd(), '10layertransformer', 'sample-epoch=99-train_loss=0.09.ckpt'))
-    # ckpt = torch.load(os.path.join(os.getcwd(), 'withsoftmax5layer', 'sample-epoch=99-train_loss=0.36.ckpt'))
+    ckpt = torch.load(os.path.join(os.getcwd(), 'ckpts_good', '10layer-epoch=99-train_loss=0.09.ckpt'))
     model.load_state_dict(ckpt['state_dict'], strict=True)
     model.cuda()
     
