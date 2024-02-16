@@ -14,6 +14,8 @@ from tqdm import tqdm
 import lightning as L
 import pickle
 
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 parser = argparse.ArgumentParser(description='Force-Aware Interface via Electromyography for Natural VR/AR Interaction')
 parser.add_argument('--seed', type=int, default=3407, help='Random seed')
@@ -21,14 +23,14 @@ parser.add_argument('--num-channels', type=int, default=8, help='Number of EMG c
 parser.add_argument('--num-forces', type=int, default=5, help='Number of forces')
 parser.add_argument('--num-force-levels', type=int, default=2, help='Number of force levels')
 parser.add_argument('--num-frames', type=int, default=32, help='Number of frames')
-parser.add_argument('--num-frequencies', type=int, default=64, help='Number of STFT frequencies')
+parser.add_argument('--num-frequencies', type=int, default=128, help='Number of STFT frequencies')
 parser.add_argument('--window-length', type=int, default=256, help='Window length for STFT')
 parser.add_argument('--hop-length', type=int, default=32, help='Hop length for STFT')
 parser.add_argument('--hop-length-test', type=int, default=8, help='Hop length for evaluation')
 parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate')
-parser.add_argument('--batch-size', type=int, default=64, help='Batch size for training')
-parser.add_argument('--num-epochs', type=int, default=30, help='Number of training epochs')
-parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay factor')
+parser.add_argument('--batch-size', type=int, default=256, help='Batch size for training')
+parser.add_argument('--num-epochs', type=int, default=100, help='Number of training epochs')
+parser.add_argument('--weight-decay', type=float, default=0, help='Weight decay factor')
 FLAGS = parser.parse_args()
 
 
@@ -43,39 +45,6 @@ def emg_valid_dataloader(args):
     return DataLoader(dataset, batch_size=len(dataset), shuffle=True, **kwargs)
 
 
-def train(model, dataloader, optimizer, args):
-    model.train()
-    correct = 0
-    all = 0
-    losses_classification = []
-    losses_regression = []
-    loop = tqdm(dataloader, leave=True)
-    
-    for emg, force, force_class in loop:
-        if args.cuda:
-            emg, force, force_class = emg.cuda(), force.cuda(), force_class.cuda()
-        logits = model(emg)
-        # Classification
-        loss_classification = F.cross_entropy(logits, force_class)
-        losses_classification.append(loss_classification.item())
-        correct += logits.max(1)[1].eq(force_class).all(1).sum().item()
-        all += force_class.shape[0] * force_class.shape[2]
-        # Regression
-        logits = logits.transpose(1, 3)
-        probs = F.softmax(logits, 3)
-        weights = torch.from_numpy(np.array([5], dtype=np.float32))
-        if args.cuda:
-            weights = weights.cuda()
-        loss_regression = F.mse_loss((F.relu(probs[..., 1] - 0.5) * weights).transpose(1, 2), force)
-        losses_regression.append(loss_regression.item())
-        # Optimization
-        optimizer.zero_grad()
-        (loss_classification + 4 * loss_regression).backward()
-        optimizer.step()
-    loss_classification = np.mean(losses_classification)
-    loss_regression = np.mean(losses_regression)
-    accuracy = 100.0 * float(correct) / all
-    return loss_classification, loss_regression, accuracy
 
 def evaluate(model, args):
     file_ids = list(range(11))
@@ -142,22 +111,41 @@ def evaluate(model, args):
 
 
 def train_lightning(args):
+    torch.set_float32_matmul_precision('medium')
+    
     dataset = EMGDataset(os.path.join(os.getcwd(), 'Dataset'))
     trainloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=10, persistent_workers=True, shuffle=True, pin_memory=True)
-    model = Lightning_VIT.EMGLightningMLP(args)
+    model = Lightning_VIT.EMGLightningNet(args)
+    
+    early_stop_callback = EarlyStopping(
+        monitor='train_acc',  # 监控的指标
+        min_delta=0.00,      # 认为改进是显著的最小变化
+        patience=3,         # 在停止前可以容忍多少个epochs没有显著改进
+        verbose=False,      # 打印一条消息当早停被触发时
+        mode='max'          # 'min' 表示目标指标的减少是改进
+    )
+    checkpoint_callback = ModelCheckpoint(
+        save_top_k=3,
+        monitor="train_loss",
+        mode="min",
+        dirpath="./withsoftmax5layer/",
+        filename="sample-{epoch:02d}-{train_loss:.2f}",
+    )
     trainer = L.Trainer(max_epochs=args.num_epochs,
-                    callbacks=[], precision="16-mixed", profiler="simple")
+                    callbacks=[early_stop_callback, checkpoint_callback], profiler="simple")
 
+    
     trainer.fit(model, train_dataloaders=trainloader,
-                    # ckpt_path=os.path.join(os.getcwd(), 'lightning_logs', 'version_12', 'checkpoints', 'epoch=11-step=17052.ckpt')
+                    # ckpt_path=os.path.join(os.getcwd(), '10layertransformer', 'sample-epoch=99-train_loss=0.09.ckpt')
+                    # ckpt_path=os.path.join(os.getcwd(), 'withsoftmax5layer', 'sample-epoch=99-train_loss=0.36.ckpt')
                     )
 
 def test_lightning(args):
     args.cuda = torch.cuda.is_available()
     args.data_path = os.path.join(os.getcwd(), 'Data')
-    model = Lightning_VIT.EMGLightningMLP(args)
-    ckpt = torch.load(os.path.join(os.getcwd(), 'lightning_logs', 'version_1', 'checkpoints', 'epoch=29-step=42630.ckpt'))
-    # ckpt = torch.load("C:\\Users\\11037\\Desktop\\xr-emg-force-interface\\lightning_logs\\version_24\\checkpoints\\epoch=59-step=85260.ckpt")
+    model = Lightning_VIT.EMGLightningNet(args)
+    ckpt = torch.load(os.path.join(os.getcwd(), '10layertransformer', 'sample-epoch=99-train_loss=0.09.ckpt'))
+    # ckpt = torch.load(os.path.join(os.getcwd(), 'withsoftmax5layer', 'sample-epoch=99-train_loss=0.36.ckpt'))
     model.load_state_dict(ckpt['state_dict'], strict=True)
     model.cuda()
     
@@ -177,3 +165,6 @@ def main(args):
 
 if __name__ == '__main__':
     main(FLAGS)
+    
+    
+#20 layer no

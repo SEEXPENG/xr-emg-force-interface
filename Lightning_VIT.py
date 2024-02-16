@@ -4,7 +4,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import lightning as L
-
+# from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import StepLR
 
 class EMGLightningNet(L.LightningModule):
 # class EMGNet(nn.Module):
@@ -26,33 +28,40 @@ class EMGLightningNet(L.LightningModule):
 
         #### selected number of dimensions in frequency domain
         self.num_frequencies = args.num_frequencies
-        # (batch, 8, 32, 64)
+        # (batch, 8, 32, 128)
         
         # encoder
         self.encoder_channel = 32
-        self.encoder1 = self._encoder_block(self.num_channels, self.encoder_channel, (1, 2))
+        self.encoder1 = self._encoder_block(self.num_channels, self.encoder_channel, (1, 4))
         # (batch, 32, 32, 32)
         
-        # transformer conv
-        self.hidden_channel = 128
-        self.patch_size = (2,2)
-        #### convolution layer to segment image into patches
-        self.patch_conv = nn.Conv2d(self.encoder_channel, self.hidden_channel, self.patch_size, stride=self.patch_size)
-        # (batch, 128, 16,16)
+        self.encoder_channel1 = 64
+        self.encoder2 = self._encoder_block(self.encoder_channel, self.encoder_channel1, (1, 4))
+        # (batch, 64, 32, 8)
+        
+        self.encoder_channel2 = 128
+        self.encoder3 = self._encoder_block(self.encoder_channel1, self.encoder_channel2, (1, 4))
+        # (batch, 128, 32, 2)
+        
+        # transformer channel
+        self.hidden_channel = 512
+        self.encoder4 = self._encoder_block(self.encoder_channel2, self.hidden_channel, (1, 2))
+        # (batch, 256, 32, 1)
+        
         
         # vision transformer
         #### positional embedding
-        self.positional_embeds = nn.Embedding(257, self.hidden_channel)
+        self.positional_embeds = nn.Embedding(33, self.hidden_channel)
         #### positional embedding's id from 0 to a big number
-        self.register_buffer("positional_ids", torch.arange(257).unsqueeze(0))
+        self.register_buffer("positional_ids", torch.arange(33).unsqueeze(0))
         #### number of transformer encoder layers
         self.num_layers = 10
         
-        # (batch, 128, 256)
+        # (batch, 256, 32)
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(
                 self.hidden_channel, # number of channels
-                2, # number of heads in attention mechanism
+                self.hidden_channel // 64, # number of heads in attention mechanism
                 self.hidden_channel * 8 // 3, # the width of feedforward network
                 activation=F.gelu,
                 batch_first=True,
@@ -60,21 +69,14 @@ class EMGLightningNet(L.LightningModule):
             ),
             self.num_layers,
         )
-        # (batch, 128, 256)
-        
-        #### deconv back
-        self.patch_deconv = nn.ConvTranspose2d(self.hidden_channel, self.hidden_channel//2, self.patch_size, stride=self.patch_size)
-        # (batch, 64, 32, 32)
-        
-        # post encoder
-        self.encoder2 = self._encoder_block(self.hidden_channel//2, self.hidden_channel//4, (1, 4))
-        # (batch, 32, 32, 8)
-        self.encoder3 = self._encoder_block(self.hidden_channel//4, self.hidden_channel//8, (1, 4))
-        # (batch, 16, 32, 2)
-        
-        # (batch, 2, 32, 16)
-        self.linear = nn.Linear(self.hidden_channel//8, self.num_forces)
-        # (batch, 2, 32, 5)
+        # (batch, 256, 32)
+
+        # (batch, 32, 256)
+        self.linear = nn.Linear(self.hidden_channel, self.num_forces)
+        # (batch, 32, 5)
+        # (batch, 32, 5, 1)
+        self.linear1 = nn.Linear(1, self.num_force_levels)
+        # (batch, 32, 5, 2)
         
         # optimizer
         self.lr = args.lr
@@ -88,7 +90,16 @@ class EMGLightningNet(L.LightningModule):
         layers.append(nn.ReLU(inplace=False))
         layers.append(nn.MaxPool2d(kernel_size=downsample, stride=downsample))
         return nn.Sequential(*layers)
-        
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, np.sqrt(2. / n))
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(0.5)
+                m.bias.data.zero_()
+    
     def forward(self, x):
         batch_size = x.size(0)
         x = x.view(batch_size * self.num_channels, x.size(2))
@@ -99,22 +110,27 @@ class EMGLightningNet(L.LightningModule):
         x = x.transpose(2, 3)[..., :self.num_frequencies]
         
         x = self.encoder1(x)
-        hidden = self.patch_conv(x)
+        x = self.encoder2(x)
+        x = self.encoder3(x)
+        hidden = self.encoder4(x)
+        # hidden = self.patch_conv(x)
         n_seq = hidden.shape[2] * hidden.shape[3]
         pos_embeds = self.positional_embeds(self.positional_ids[:, :n_seq]).expand(hidden.shape[0], -1, -1)
         output = self.transformer(hidden.flatten(2).transpose(1, 2) + pos_embeds).transpose(-1, -2).view_as(hidden)
-        x = self.patch_deconv(output)
+        # (batch, 64, 32)
         
-        x = self.encoder2(x)
-        x = self.encoder3(x)
-        # (batch, 16, 32, 2)
-        # x = x.view(x.size(0), x.size(1), x.size(2))
-
-        x = x.transpose(1, 3)
-        # (batch, 2, 32, 16)
+        x = output.view(output.size(0), output.size(1), output.size(2))
+        x = x.transpose(1, 2)
+        # (batch, 32, 64)
         x = self.linear(x)
-        # (batch, 2, 32, 5)
-        x = x.transpose(2, 3)
+        # (batch, 32, 5)
+        x = torch.unsqueeze(x, dim=3)
+        x = self.linear1(x)
+        
+        # x = F.softmax(x, dim = -1)
+        
+        # (batch, 32, 5, 2)
+        x = x.transpose(1, 3)
         # x = x.view(x.size(0), self.num_force_levels, self.num_forces, x.size(2))
         return x
 
@@ -124,14 +140,24 @@ class EMGLightningNet(L.LightningModule):
         logits = self.forward(emg)
         # Classification
         loss_classification = F.cross_entropy(logits, force_class)
+        
+        correct = logits.max(1)[1].eq(force_class).all(1).sum().item()
+        all = force_class.shape[0] * force_class.shape[2]
         # Regression
         logits = logits.transpose(1, 3)
         probs = F.softmax(logits, 3)
         weights = torch.from_numpy(np.array([5], dtype=np.float32)).to(self.device)
         loss_regression = F.mse_loss((F.relu(probs[..., 1] - 0.5) * weights).transpose(1, 2), force)
         # Optimization
-        loss = loss_classification + 4 * loss_regression
-        self.log("train_loss", loss, prog_bar=True)
+        loss = loss_classification + 4*loss_regression
+        
+        
+        accuracy = 100.0 * float(correct) / all
+        self.log_dict({"train_loss": loss, "train_acc": accuracy}, on_step=False, on_epoch=True, prog_bar=True)
+        
+        current_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log('learning_rate', current_lr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
         return loss
     
     def validation_step(self, batch, batch_idx):
@@ -151,11 +177,13 @@ class EMGLightningNet(L.LightningModule):
         loss = loss_classification + 4 * loss_regression
         accuracy = 100.0 * float(correct) / all
         self.log("valid_acc", accuracy, prog_bar=True)
-        return loss
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        return optimizer
+        scheduler = StepLR(optimizer, step_size=10, gamma=0.7)  # Decrease lr every 10 epochs by a factor of 0.1
+
+        return {'optimizer': optimizer, 'lr_scheduler': scheduler}
+        # return optimizer
     
     
 class EMGLightningMLP(L.LightningModule):
