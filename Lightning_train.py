@@ -69,6 +69,7 @@ def evaluate(model, args):
                 force_class = torch.from_numpy(np.load(os.path.join(args.data_path, "Session{:d}".format(sid), "force_class_test_{:d}.npy".format(fid))))
                 if args.cuda:
                     emg, force, force_class = emg.cuda(), force.cuda(), force_class.cuda()
+                print(emg.shape)
                 logits = model(emg)
                 logits = logits[..., -args.hop_length_test:]
                 force = force[..., -args.hop_length_test:]
@@ -98,16 +99,20 @@ def evaluate(model, args):
             force_gt_session_all.append(np.stack(force_gt_session, axis=0))
     force_pred_session_all = np.stack(force_pred_session_all, axis=0)
     force_gt_session_all = np.stack(force_gt_session_all, axis=0)
+    print(force_pred_session_all.shape)
     NRMSE = 100.0 * np.sqrt(((force_pred_session_all - force_gt_session_all)**2).mean()) / 2.5
     NRMSE_filewise = 100.0 * np.sqrt(((force_pred_session_all - force_gt_session_all)**2).mean((0, 2, 3))) / 2.5
+    NRMSE_userwise = 100.0 * np.sqrt(((force_pred_session_all - force_gt_session_all)**2).mean((1, 2, 3))) / 2.5
     R2 = 100.0 * (1.0 - ((force_pred_session_all - force_gt_session_all)**2).sum() / ((force_gt_session_all - force_gt_session_all.mean())**2).sum())
     R2_filewise = 100.0 * (1.0 - ((force_pred_session_all - force_gt_session_all)**2).sum((0, 2, 3)) / ((force_gt_session_all - force_gt_session_all.mean())**2).sum((0, 2, 3)))
+    R2_userwise = 100.0 * (1.0 - ((force_pred_session_all - force_gt_session_all)**2).sum((1, 2, 3)) / ((force_gt_session_all - force_gt_session_all.mean())**2).sum((1, 2, 3)))
     loss_classification = np.mean(losses_classification)
     loss_regression = np.mean(losses_regression)
     accuracy = 100.0 * correct.mean() / all.mean()
     accuracy_filewise = 100.0 * correct.mean(0) / all.mean(0)
+    accuracy_userwise = 100.0 * correct.mean(1) / all.mean(1)
     accuracy_framewise = 100.0 * correct_framewise / all_framewise
-    return loss_classification, loss_regression, accuracy, accuracy_filewise, accuracy_framewise, NRMSE, NRMSE_filewise, R2, R2_filewise
+    return loss_classification, loss_regression, accuracy, accuracy_filewise, accuracy_userwise, accuracy_framewise, NRMSE, NRMSE_filewise, NRMSE_userwise, R2, R2_filewise, R2_userwise
 
 
 
@@ -144,17 +149,47 @@ def test_lightning(args):
     args.cuda = torch.cuda.is_available()
     args.data_path = os.path.join(os.getcwd(), 'Data')
     model = Lightning_VIT.EMGLightningNet(args)
-    ckpt = torch.load(os.path.join(os.getcwd(), 'ckpts_good', '10layer-epoch=99-train_loss=0.09.ckpt'))
+    ckpt = torch.load(os.path.join(os.getcwd(), 'ckpts_good', '10layer-epoch99-train_loss0.09.ckpt'))
     model.load_state_dict(ckpt['state_dict'], strict=True)
     model.cuda()
     
-    loss_cls_test, loss_reg_test, acc_test, acc_filewise_test, acc_framewise_test, NRMSE_test, NRMSE_filewise_test, R2_test, R2_filewise_test = evaluate(model, args)
+    from torchprofile import profile_macs
+    input = torch.randn(1, 8, 1248).cuda()
+    macs = profile_macs(model, (input,))
+    print("MACs:", macs)
+    
+    import time
+    input_tensor = torch.randn(1, 8, 1248).cuda()
 
-    print(" Test Cls loss: {:.4f} | Test Reg Loss: {:.4f}| Test accuracy(%): {:.2f} | NRMSE(%): {:.2f} | R2(%): {:.2f}".format(
-        loss_cls_test, loss_reg_test, acc_test, NRMSE_test, R2_test))
-    print("Test action-wise accuracy(%): {}".format(np.array2string(acc_filewise_test, precision=2, separator=', ')))
-    print("Test action-wise NRMSE(%): {}".format(np.array2string(NRMSE_filewise_test, precision=2, separator=', ')))
-    print("Test action-wise R2(%): {}".format(np.array2string(R2_filewise_test, precision=2, separator=', ')))
+    # 使用torch.utils.benchmark来测量推理时间
+    torch.cuda.synchronize()  # 等待CUDA操作完成
+    start_time = time.time()
+
+    with torch.no_grad():
+        output = model(input_tensor)
+
+    torch.cuda.synchronize()  # 等待CUDA操作完成
+    end_time = time.time()
+
+    inference_time = end_time - start_time
+    print("Inference Time: {:.4f} seconds".format(inference_time))
+    
+    # loss_cls_test, loss_reg_test, acc_test, acc_filewise_test, acc_user_test, acc_framewise_test, NRMSE_test, NRMSE_filewise_test, NRMSE_userwise_test, R2_test, R2_filewise_test, R2_userwise_test  = evaluate(model, args)
+
+    
+    # print(" Test Cls loss: {:.4f} | Test Reg Loss: {:.4f}| Test accuracy(%): {:.2f} | NRMSE(%): {:.2f} | R2(%): {:.2f}".format(
+    #     loss_cls_test, loss_reg_test, acc_test, NRMSE_test, R2_test))
+    # print("Test user-wise accuracy(%): {}".format(np.array2string(acc_user_test, precision=2, separator=', ')))
+    # print("Test user-wise NRMSE(%): {}".format(np.array2string(NRMSE_userwise_test, precision=2, separator=', ')))
+    # print("Test user-wise R2(%): {}".format(np.array2string(R2_userwise_test, precision=2, separator=', ')))
+    
+    # print("Test user-wise accuracy std(%): {}".format(acc_user_test.std()))
+    # print("Test user-wise NRMSE std(%): {}".format(NRMSE_userwise_test.std()))
+    # print("Test user-wise R2 std(%): {}".format(R2_userwise_test.std()))
+    
+    # print("Test action-wise accuracy(%): {}".format(np.array2string(acc_filewise_test, precision=2, separator=', ')))
+    # print("Test action-wise NRMSE(%): {}".format(np.array2string(NRMSE_filewise_test, precision=2, separator=', ')))
+    # print("Test action-wise R2(%): {}".format(np.array2string(R2_filewise_test, precision=2, separator=', ')))
     
 def main(args):
     torch.cuda.manual_seed(args.seed)
